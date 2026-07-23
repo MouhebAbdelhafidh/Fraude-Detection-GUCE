@@ -1,0 +1,83 @@
+# ==============================================================================
+# ENVIRONMENT & VIRTUAL ENVS
+# ==============================================================================
+venv/
+.venv/
+env/
+.env
+
+# ==============================================================================
+# WINDOWS & SYSTEM ARTIFACTS
+# ==============================================================================
+*:Zone.Identifier
+*Zone.Identifier*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ==============================================================================
+# PYTHON CACHE & BUILD ARTIFACTS
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+backend/src/mlops/mlops_fraud_pipeline.egg-info/
+
+# ==============================================================================
+# MLFLOW & ARTIFACT LOGGING
+# ==============================================================================
+mlruns/
+mlruns_data/
+mlartifacts/
+**/mlartifacts/
+backend/src/mlops/mlartifacts/
+
+# ==============================================================================
+# HEAVY DATA, PROFILING & VECTOR DATABASE DIRECTORIES
+# ==============================================================================
+backend/data/
+backend/datamlops/
+datamlops/
+backend/src/profilling_siat_cc/
+backend/src/qdrant_customs_db/
+
+# ==============================================================================
+# EXPERIMENTS & SPECIFIC DIRECTORIES
+# ==============================================================================
+backend/src/GNN_Experiments/src/
+backend/src/models/
+backend/models/
+
+# ==============================================================================
+# MODEL WEIGHTS, DRIVERS & BINARY FILES
+# ==============================================================================
+*.joblib
+*.pt
+*.pth
+*.pkl
+*.parquet
+*.onnx
+*.h5
+*.jar
+postgresql-42.7.2.jar
+postgresql-42.7.2
+*.db
+*.sqlite
+.lock
+
+# ==============================================================================
+# AIRFLOW & IDE LOCAL SETTINGS
+# ==============================================================================
+airflow/airflow.db*
+airflow/simple_auth_manager_passwords.json.generated
+airflow.cfg
+airflow.db
+airflow.db-shm
+airflow.db-wal
+logs/
+.vscode/
+.idea/

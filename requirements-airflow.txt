@@ -1,0 +1,12 @@
+pandas>=2.1.0
+numpy>=1.26.0
+scikit-learn
+joblib
+networkx
+pyarrow
+mlflow
+pyspark
+optuna
+xgboost
+pyod
+evidently
