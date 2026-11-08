@@ -1,10 +1,15 @@
 # ==============================================================================
-# ENVIRONMENT & VIRTUAL ENVS
+# ENVIRONMENT, SECRETS & VIRTUAL ENVS
 # ==============================================================================
 venv/
 .venv/
 env/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
 
 # ==============================================================================
 # WINDOWS & SYSTEM ARTIFACTS
@@ -14,6 +19,7 @@ env/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+.DS_Store
 
 # ==============================================================================
 # PYTHON CACHE & BUILD ARTIFACTS
@@ -25,7 +31,22 @@ __pycache__/
 *.egg
 build/
 dist/
-backend/src/mlops/mlops_fraud_pipeline.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ==============================================================================
+# NODE / FRONTEND
+# ==============================================================================
+node_modules/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+# stray root-level npm files (the real ones live in frontend/)
+/package.json
+/package-lock.json
 
 # ==============================================================================
 # MLFLOW & ARTIFACT LOGGING
@@ -46,11 +67,22 @@ backend/src/profilling_siat_cc/
 backend/src/qdrant_customs_db/
 
 # ==============================================================================
-# EXPERIMENTS & SPECIFIC DIRECTORIES
+# GENERATED ANALYSIS OUTPUT
+# ==============================================================================
+backend/src/figures/
+backend/src/univariate_plots/
+backend/src/database_schema_diagram.png
+backend/src/database_schema_diagram.svg
+backend/src/data_health_audit_report.md
+
+# ==============================================================================
+# EXPERIMENTS, SCRATCH & SPECIFIC DIRECTORIES
 # ==============================================================================
 backend/src/GNN_Experiments/src/
 backend/src/models/
 backend/models/
+frontend1/
+addtable.py
 
 # ==============================================================================
 # MODEL WEIGHTS, DRIVERS & BINARY FILES

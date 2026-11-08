@@ -1,7 +1,7 @@
 # pipeline_tasks.py
 import os
 import sys
-
+from datetime import datetime, timezone
 # ------------------------------------------------------------------
 # PATH INJECTION
 # ------------------------------------------------------------------
@@ -332,9 +332,9 @@ def task_run_data_drift_audit(**context):
     """
     Compares an early vs. late slice of the GNN's file-node feature space
     to catch input drift before it silently degrades the trained GNN's
-    scoring. This is an observability signal (HTML report + MLflow
-    metrics) -- it is intentionally NOT fed into task_final_fraud_fusion
-    as a scoring input.
+    scoring. This is an observability signal (HTML report + a clean JSON
+    summary + MLflow metrics) -- it is intentionally NOT fed into
+    task_final_fraud_fusion as a scoring input.
     """
     print("Executing Airflow Task: Data Drift Audit (Evidently)...")
 
@@ -401,6 +401,9 @@ def task_run_data_drift_audit(**context):
                 continue
 
     import json
+
+    # Keep the full raw export around for debugging -- this is NOT what the
+    # frontend reads, since its shape is Evidently-version-dependent.
     debug_json_path = os.path.join(report_dir, "data_drift_latest_debug.json")
     try:
         with open(debug_json_path, "w") as f:
@@ -444,6 +447,92 @@ def task_run_data_drift_audit(**context):
               f"Top-level keys in the exported dict: {top_level}. "
               f"Inspect {debug_json_path} to find the actual field name, then it can be added to the search list above.")
 
+    # ------------------------------------------------------------------
+    # PER-COLUMN SUMMARY -- this is the file the frontend actually consumes.
+    # Evidently's export shape shifts between versions (nesting, key names),
+    # so we walk the whole tree once here and collect every dict that looks
+    # like a per-column drift result, rather than making the React app guess.
+    # ------------------------------------------------------------------
+    def _get(d, *keys):
+        for k in keys:
+            if k in d:
+                return d[k]
+        return None
+
+    WATCH_THRESHOLD = 0.1  # matches the frontend's previous fallback convention
+
+    def _extract_per_column_drift(node, results, seen):
+        if isinstance(node, dict):
+            col_name = _get(node, "column_name", "column", "name")
+            score = _get(node, "drift_score", "stat_test_value", "value")
+            detected = _get(node, "drift_detected", "drift_status")
+            if col_name is not None and (score is not None or detected is not None) and col_name not in seen:
+                seen.add(col_name)
+                try:
+                    score_f = float(score) if score is not None else None
+                except (TypeError, ValueError):
+                    score_f = None
+
+                if detected is not None:
+                    is_drifted = bool(detected)
+                elif score_f is not None:
+                    is_drifted = score_f >= WATCH_THRESHOLD * 2  # conservative fallback
+                else:
+                    is_drifted = False
+
+                if is_drifted:
+                    status = "Drifted"
+                elif score_f is not None and score_f >= WATCH_THRESHOLD:
+                    status = "Watch"
+                else:
+                    status = "Stable"
+
+                p_val = _get(node, "p_value")
+                try:
+                    p_val_f = float(p_val) if p_val is not None else None
+                except (TypeError, ValueError):
+                    p_val_f = None
+
+                results.append({
+                    "feature": str(col_name),
+                    "drift_score": round(score_f, 6) if score_f is not None else 0.0,
+                    "p_value": p_val_f,
+                    "status": status,
+                    "type": str(_get(node, "column_type", "type") or "Numerical"),
+                })
+            for v in node.values():
+                _extract_per_column_drift(v, results, seen)
+        elif isinstance(node, list):
+            for item in node:
+                _extract_per_column_drift(item, results, seen)
+
+    per_column_results = []
+    _extract_per_column_drift(result_dict, per_column_results, set())
+    per_column_results.sort(key=lambda r: r["drift_score"], reverse=True)
+
+    summary_json_path = os.path.join(report_dir, "data_drift_summary.json")
+    summary_payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dataset_drift": bool(dataset_drift) if dataset_drift is not None else None,
+        "share_of_drifted_columns": float(share_drifted) if share_drifted is not None else None,
+        "n_reference_rows": len(reference_data),
+        "n_current_rows": len(current_data),
+        "features": per_column_results,
+    }
+    try:
+        with open(summary_json_path, "w") as f:
+            json.dump(summary_payload, f, indent=2)
+        print(f"✅ Clean drift summary saved for frontend consumption: {summary_json_path} "
+              f"({len(per_column_results)} feature(s))")
+    except Exception as e:
+        print(f"⚠️ Could not write drift summary JSON: {e}")
+
+    if not per_column_results:
+        print("⚠️ No per-column drift entries were extracted from the Evidently result dict. "
+              f"The frontend will fall back to its own placeholder data. Inspect {debug_json_path} "
+              "to find the actual per-column key names in this Evidently version, then extend "
+              "the candidate key lists in _extract_per_column_drift / _get above.")
+
     with child_run("data_drift_audit", parent_run_id):
         mlflow.log_param("split_method", "positional_70_30")
         mlflow.log_param("drift_method", "wasserstein")
@@ -454,6 +543,7 @@ def task_run_data_drift_audit(**context):
         if share_drifted is not None:
             mlflow.log_metric("share_of_drifted_columns", float(share_drifted))
         mlflow.log_artifact(report_path)
+        mlflow.log_artifact(summary_json_path)
 
 def task_final_fraud_fusion(w_tabular: float = 0.60, w_gnn: float = 0.40, risk_threshold: float = 0.5, **context):
     """

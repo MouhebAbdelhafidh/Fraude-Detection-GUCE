@@ -1,297 +1,282 @@
-# import sys
-# import os
-# import pandas as pd
-# import numpy as np
-# import torch
-# import torch.nn.functional as F
-# from torch_geometric.data import HeteroData
-# import torch_geometric.transforms as T
-# from torch_geometric.nn import SAGEConv, to_hetero, LayerNorm
-# from sklearn.metrics import roc_auc_score
-
-# # ======================================================================
-# # CONFIGURATION SWITCHES
-# # ======================================================================
-# FORCE_CPU = True  # Keeps execution stable on CPU to bypass version warnings
-
-# # ======================================================================
-# # 1. DEFINE THE NEURAL NETWORK ARCHITECTURE (STABILIZED)
-# # ======================================================================
-# class HeteroGNNEncoder(torch.nn.Module):
-#     def __init__(self, hidden_channels):
-#         super().__init__()
-#         self.conv1 = SAGEConv((-1, -1), hidden_channels)
-#         self.ln1 = LayerNorm(hidden_channels) # Prevents feature magnitude explosion
-        
-#         self.conv2 = SAGEConv((-1, -1), hidden_channels)
-#         self.ln2 = LayerNorm(hidden_channels)
-
-#     def forward(self, x, edge_index):
-#         # Layer 1
-#         x = self.conv1(x, edge_index)
-#         x = self.ln1(x)
-#         x = F.relu(x)
-        
-#         # Layer 2
-#         x = self.conv2(x, edge_index)
-#         x = self.ln2(x)
-#         return x
-
-# class LinkPredictor(torch.nn.Module):
-#     def forward(self, x_file, x_user, edge_label_index):
-#         src, dst = edge_label_index[0], edge_label_index[1]
-        
-#         # Normalize vectors to compute Cosine Similarity instead of raw dot-product.
-#         # This keeps raw affinity logits bounded strictly between -1.0 and 1.0.
-#         f_vector = F.normalize(x_file[src], p=2, dim=-1)
-#         u_vector = F.normalize(x_user[dst], p=2, dim=-1)
-        
-#         scores = (f_vector * u_vector).sum(dim=-1) 
-        
-#         # Optional scaling factor to allow tighter sigmoid adjustments
-#         return torch.sigmoid(scores * 5.0)
-
-# # ======================================================================
-# # PROTOCOL BARRIER: MODULE IMPORT PROTECTION SCRIPT GUARD
-# # ======================================================================
-# if __name__ == "__main__":
-#     """
-#     Any code running inside this block executes ONLY when running SAGEGNN.py directly.
-#     When imported as a module by deployment/triage_engine.py, this entire block 
-#     is skipped, protecting FastAPI from path errors and training loop collisions.
-#     """
-    
-#     # Hardware Configuration
-#     device = torch.device('cpu')
-#     print("💻 Target Device: Explicitly falling back to CPU for architecture stability.")
-
-#     # Verify and Load Data
-#     print("\n🔎 Verifying path structures...")
-#     current_dir = os.path.dirname(os.path.abspath(__file__))
-#     path_prefix = os.path.join(current_dir, "data", "processed")
-
-#     if not os.path.exists(path_prefix):
-#         print(f"❌ ERROR: Processed data directory missing at: {path_prefix}")
-#         sys.exit(1)
-
-#     print("📦 Loading node and edge matrices from storage...")
-#     try:
-#         df_u = pd.read_parquet(os.path.join(path_prefix, "final_graph_user_nodes")).sort_values("user_gnn_idx")
-#         df_c = pd.read_parquet(os.path.join(path_prefix, "final_graph_company_nodes")).sort_values("company_gnn_idx")
-#         df_f = pd.read_parquet(os.path.join(path_prefix, "final_graph_file_nodes")).sort_values("file_gnn_idx")
-#         edges_user = pd.read_parquet(os.path.join(path_prefix, "final_edge_file_to_user"))
-#         edges_comp = pd.read_parquet(os.path.join(path_prefix, "final_edge_file_to_company"))
-
-#         data = HeteroData()
-#         data['user'].x = torch.tensor(np.stack(df_u['user_features'].values), dtype=torch.float)
-#         data['company'].x = torch.tensor(np.stack(df_c['company_features'].values), dtype=torch.float)
-#         data['file'].x = torch.tensor(np.stack(df_f['file_features'].values), dtype=torch.float)
-
-#         data['file', 'assigned_to', 'user'].edge_index = torch.tensor(
-#             edges_user[['source_file_idx', 'target_user_idx']].values, dtype=torch.long
-#         ).t().contiguous()
-
-#         data['file', 'linked_to', 'company'].edge_index = torch.tensor(
-#             edges_comp[['source_file_idx', 'target_company_idx']].values, dtype=torch.long
-#         ).t().contiguous()
-
-#         print("✅ Directed HeteroData graph base structure successfully instantiated!")
-
-#     except Exception as e:
-#         print(f"❌ Python Exception Caught During Data Stage: {str(e)}")
-#         sys.exit(1)
-
-#     # Run Heterogeneous Random Link Split
-#     print("\n✂️ Slicing structural relationships into Train / Val / Test subsets...")
-#     link_splitter = T.RandomLinkSplit(
-#         num_val=0.10,                      
-#         num_test=0.10,                     
-#         neg_sampling_ratio=1.0,            
-#         edge_types=('file', 'assigned_to', 'user'), 
-#         add_negative_train_samples=True,   
-#         rev_edge_types=('user', 'rev_assigned_to', 'file')
-#     )
-
-#     train_data, val_data, test_data = link_splitter(data)
-
-#     train_data = T.ToUndirected()(train_data)
-#     val_data = T.ToUndirected()(val_data)
-#     test_data = T.ToUndirected()(test_data)
-
-#     print("✅ Graph split partitions securely isolated and transformed into undirected views.")
-
-#     # Initialize Architecture & Map Heterogeneous Metadata
-#     hidden_dim = 64
-#     base_encoder = HeteroGNNEncoder(hidden_channels=hidden_dim)
-
-#     encoder = to_hetero(base_encoder, train_data.metadata(), aggr='sum')
-#     predictor = LinkPredictor()
-
-#     encoder = encoder.to(device)
-#     predictor = predictor.to(device)
-
-#     optimizer = torch.optim.Adam(list(encoder.parameters()) + list(predictor.parameters()), lr=0.001)
-#     criterion = torch.nn.BCELoss()
-
-#     # Define Hardware Execution Loops
-#     def train_epoch():
-#         encoder.train()
-#         predictor.train()
-#         optimizer.zero_grad()
-        
-#         batch_data = train_data.to(device)
-#         node_embeddings = encoder(batch_data.x_dict, batch_data.edge_index_dict)
-        
-#         file_emb = node_embeddings['file']
-#         user_emb = node_embeddings['user']
-#         target_edges = batch_data['file', 'assigned_to', 'user'].edge_label_index
-        
-#         predictions = predictor(file_emb, user_emb, target_edges)
-#         ground_truth = batch_data['file', 'assigned_to', 'user'].edge_label.float()
-        
-#         loss = criterion(predictions, ground_truth)
-#         loss.backward()
-#         optimizer.step()
-#         return loss.item()
-
-#     @torch.no_grad()
-#     def evaluate_split(split_data):
-#         encoder.eval()
-#         predictor.eval()
-        
-#         batch_data = split_data.to(device)
-#         node_embeddings = encoder(batch_data.x_dict, batch_data.edge_index_dict)
-        
-#         target_edges = batch_data['file', 'assigned_to', 'user'].edge_label_index
-#         predictions = predictor(node_embeddings['file'], node_embeddings['user'], target_edges)
-        
-#         y_true = batch_data['file', 'assigned_to', 'user'].edge_label.cpu().numpy()
-#         y_pred = predictions.cpu().numpy()
-        
-#         return roc_auc_score(y_true, y_pred)
-
-#     # Run Optimization Pipeline
-#     print("\n🏋️ Commencing model training routine over 40 epochs...")
-#     print("=" * 65)
-
-#     for epoch in range(1, 41):
-#         loss_val = train_epoch()
-        
-#         if epoch % 5 == 0 or epoch == 1:
-#             val_auc = evaluate_split(val_data)
-#             print(f"🔥 Epoch {epoch:02d}/40 | Optimization Loss: {loss_val:.4f} | Val ROC-AUC: {val_auc:.4f}")
-
-#     test_auc = evaluate_split(test_data)
-#     print("=" * 65)
-#     print(f"🎯 FINAL PERFORMANCE BENCHMARK ON HOLDOUT TEST DECK: {test_auc:.4f}")
-#     print("=" * 65)
-
-#     # Save Model Weights
-#     print("\n💾 Saving trained model checkpoints to disk...")
-#     torch.save(encoder.state_dict(), "hetero_gnn_encoder.pt")
-#     torch.save(predictor.state_dict(), "link_predictor.pt")
-#     print("✅ Checkpoints saved as 'hetero_gnn_encoder.pt' and 'link_predictor.pt'")
-
-#     @torch.no_grad()
-#     def calculate_link_probability(file_idx, user_idx):
-#         encoder.eval()
-#         predictor.eval()
-        
-#         test_view = test_data.to(device)
-#         node_embeddings = encoder(test_view.x_dict, test_view.edge_index_dict)
-        
-#         query_edge = torch.tensor([[file_idx], [user_idx]], dtype=torch.long).to(device)
-#         probability = predictor(node_embeddings['file'], node_embeddings['user'], query_edge)
-        
-#         return probability.item()
-
-#     print("\n🎯 Entering Active Inference Testing Mode...")
-#     print("-" * 65)
-
-#     sample_file = 0
-#     sample_user = 0
-
-#     try:
-#         score = calculate_link_probability(sample_file, sample_user)
-#         print(f"🔮 Query Link Assessment:")
-#         print(f"  • File GNN Index : {sample_file}")
-#         print(f"  • User GNN Index : {sample_user}")
-#         print(f"  • Match Confidence Probability: {score * 100:.2f}%")
-
-#         if score < 0.15:
-#             print("🚨 ALERT: Extremely low structural affinity. Anomaly/High Risk configuration!")
-#         elif score > 0.85:
-#             print("🟢 SAFE: Highly typical behavioral connection pattern.")
-#         else:
-#             print("🟡 CAUTION: Ambiguous/Unusual structural relationship.")
-#     except Exception as e:
-#         print(f"⚠️ Inference skipping: Index bounds vary based on dataset layout limits ({str(e)}).")
-#     print("-" * 65)
-
-#     # Automated Anomaly Audit
-#     print("🕵️ Analyzing existing links to extract hidden high-risk anomalies...")
-
-#     encoder.eval()
-#     predictor.eval()
-#     with torch.no_grad():
-#         val_view = val_data.to(device)
-#         val_embeddings = encoder(val_view.x_dict, val_view.edge_index_dict)
-        
-#         real_edges = val_view['file', 'assigned_to', 'user'].edge_label_index
-#         real_labels = val_view['file', 'assigned_to', 'user'].edge_label
-        
-#         true_positive_mask = (real_labels == 1)
-#         real_edges = real_edges[:, true_positive_mask]
-        
-#         src, dst = real_edges[0], real_edges[1]
-#         file_emb = val_embeddings['file'][src]
-#         user_emb = val_embeddings['user'][dst]
-        
-#         raw_logits = (file_emb * user_emb).sum(dim=-1).cpu().numpy()
-#         probabilities = torch.sigmoid(torch.tensor(raw_logits)).numpy()
-
-#     max_render = min(5, len(raw_logits))
-#     if max_render > 0:
-#         suspicious_indices = np.argsort(raw_logits)[:max_render]
-
-#         print(f"\n🚨 TOP {max_render} MOST SUSPICIOUS SYSTEM INTERACTIONS DETECTED:")
-#         print("=================================================================")
-#         for rank, idx in enumerate(suspicious_indices, 1):
-#             f_idx = real_edges[0][idx].item()
-#             u_idx = real_edges[1][idx].item()
-#             logit_val = raw_logits[idx]
-#             model_prob = probabilities[idx]
-            
-#             print(f" Rank {rank} | File #{f_idx:5d} linked to User #{u_idx:2d} | Raw Affinity Logit: {logit_val:.4f} (Prob: {model_prob * 100:.2f}%)")
-#         print("=================================================================")
-#     else:
-#         print("⚠️ No valid structural evaluation edges found to execute anomaly log comparisons.")
-
-# SAGEGNN.py
+import os
+import glob
+import math
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import SAGEConv, LayerNorm
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
+import matplotlib.pyplot as plt
 
-class HeteroGNNEncoder(torch.nn.Module):
-    def __init__(self, hidden_channels=64):
+# ==========================================
+# 1. Hyperparameters & Settings
+# ==========================================
+DATASET_PATH = "./data/cat"
+IMAGE_SIZE = 128
+BATCH_SIZE = 16
+LEARNING_RATE = 2e-4
+EPOCHS = 20
+TIMESTEPS = 300  # Number of diffusion time steps
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# ==========================================
+# 2. Diffusion Beta Schedule (Linear)
+# ==========================================
+betas = torch.linspace(1e-4, 0.02, TIMESTEPS).to(DEVICE)
+alphas = 1.0 - betas
+alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+def q_sample(x_0, t, noise=None):
+    """Forward Process: Adds noise to clean image x_0 at time step t"""
+    if noise is None:
+        noise = torch.randn_like(x_0)
+    
+    alpha_t = alphas_cumprod[t].view(-1, 1, 1, 1)
+    noisy_x = torch.sqrt(alpha_t) * x_0 + torch.sqrt(1 - alpha_t) * noise
+    return noisy_x, noise
+
+
+# ==========================================
+# 3. Sinusoidal Time Embedding
+# ==========================================
+class TimeEmbedding(nn.Module):
+    def __init__(self, dim):
         super().__init__()
-        self.conv1 = SAGEConv((-1, -1), hidden_channels)
-        self.ln1 = LayerNorm(hidden_channels)
-        self.conv2 = SAGEConv((-1, -1), hidden_channels)
-        self.ln2 = LayerNorm(hidden_channels)
+        self.dim = dim
 
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = self.ln1(x)
-        x = F.relu(x)
-        x = self.conv2(x, edge_index)
-        x = self.ln2(x)
-        return x
+    def forward(self, time):
+        half_dim = self.dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=DEVICE) * -embeddings)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
 
-class LinkPredictor(torch.nn.Module):
-    def forward(self, x_file, x_user, edge_label_index):
-        src, dst = edge_label_index[0], edge_label_index[1]
-        f_vector = F.normalize(x_file[src], p=2, dim=-1)
-        u_vector = F.normalize(x_user[dst], p=2, dim=-1)
-        scores = (f_vector * u_vector).sum(dim=-1)
-        return torch.sigmoid(scores * 5.0)
+
+# ==========================================
+# 4. Conditional U-Net Architecture (Img2Img)
+# ==========================================
+class ResidualBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, time_emb_dim):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.time_mlp = nn.Linear(time_emb_dim, out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.shortcut = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, t_emb):
+        h = self.relu(self.conv1(x))
+        # Inject time embedding into feature maps
+        time_feats = self.relu(self.time_mlp(t_emb))[:, :, None, None]
+        h = h + time_feats
+        h = self.conv2(h)
+        return self.relu(h + self.shortcut(x))
+
+
+class ConditionalUNet(nn.Module):
+    def __init__(self, in_channels=6, out_channels=3, time_dim=128):
+        """
+        in_channels = 6 because we concatenate:
+        3 channels (noisy image x_t) + 3 channels (condition image x_cond)
+        """
+        super().__init__()
+        self.time_mlp = nn.Sequential(
+            TimeEmbedding(time_dim),
+            nn.Linear(time_dim, time_dim),
+            nn.ReLU()
+        )
+
+        # Encoder
+        self.inc = ResidualBlock(in_channels, 64, time_dim)
+        self.down1 = nn.Conv2d(64, 64, 4, stride=2, padding=1)  # 64x64
+        self.enc1 = ResidualBlock(64, 128, time_dim)
+        
+        self.down2 = nn.Conv2d(128, 128, 4, stride=2, padding=1) # 32x32
+        self.enc2 = ResidualBlock(128, 256, time_dim)
+
+        # Bottleneck
+        self.bottleneck = ResidualBlock(256, 256, time_dim)
+
+        # Decoder + Skip Connections
+        self.up2 = nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1)
+        self.dec2 = ResidualBlock(256, 128, time_dim)
+
+        self.up1 = nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1)
+        self.dec1 = ResidualBlock(128, 64, time_dim)
+
+        self.outc = nn.Conv2d(64, out_channels, 1)
+
+    def forward(self, x_t, x_cond, t):
+        t_emb = self.time_mlp(t)
+        
+        # Concatenate noisy image and conditioning image along channel axis
+        x = torch.cat([x_t, x_cond], dim=1)  # (B, 6, H, W)
+
+        # Encoder
+        e1 = self.inc(x, t_emb)
+        e2 = self.enc1(self.down1(e1), t_emb)
+        b = self.bottleneck(self.enc2(self.down2(e2), t_emb), t_emb)
+
+        # Decoder + Skip Connections
+        d2 = self.up2(b)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2, t_emb)
+
+        d1 = self.up1(d2)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1, t_emb)
+
+        return self.outc(d1)
+
+
+# ==========================================
+# 5. Sampling / Inference Procedure
+# ==========================================
+@torch.no_grad()
+def sample_img2img(model, x_cond, timesteps=TIMESTEPS):
+    """Generates a clean image starting from noise, guided by x_cond"""
+    model.eval()
+    batch_size = x_cond.shape[0]
+    
+    # Start from pure noise x_T
+    x_t = torch.randn_like(x_cond).to(DEVICE)
+
+    for t_idx in reversed(range(timesteps)):
+        t = torch.full((batch_size,), t_idx, device=DEVICE, dtype=torch.long)
+        
+        # Predict noise
+        predicted_noise = model(x_t, x_cond, t)
+        
+        # Reverse Diffusion Formula: x_{t-1} calculation
+        beta_t = betas[t_idx]
+        alpha_t = alphas[t_idx]
+        alpha_cumprod_t = alphas_cumprod[t_idx]
+        
+        mean = (1 / torch.sqrt(alpha_t)) * (x_t - (beta_t / torch.sqrt(1 - alpha_cumprod_t)) * predicted_noise)
+        
+        if t_idx > 0:
+            noise = torch.randn_like(x_t)
+            x_t = mean + torch.sqrt(beta_t) * noise
+        else:
+            x_t = mean
+
+    return torch.clamp(x_t, -1.0, 1.0)
+
+
+# ==========================================
+# 6. Dataset Loader (Creates Synthetic Img2Img Pairs)
+# ==========================================
+class Img2ImgDataset(Dataset):
+    """Loads images and creates a degraded version (Blur/Low-Res) as x_cond"""
+    def __init__(self, folder_path, image_size=128):
+        extensions = ("*.jpg", "*.jpeg", "*.png")
+        self.image_paths = []
+        for ext in extensions:
+            self.image_paths.extend(glob.glob(os.path.join(folder_path, ext)))
+
+        self.clean_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Normalize to [-1, 1]
+        ])
+
+        # Condition Transform: Downscales & Blurs image to create an Img2Img task
+        self.cond_transform = transforms.Compose([
+            transforms.Resize((image_size // 4, image_size // 4)), # Downscale
+            transforms.Resize((image_size, image_size)),           # Upscale back (Pixelated)
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        raw_img = Image.open(img_path).convert("RGB")
+        
+        x_clean = self.clean_transform(raw_img)
+        x_cond = self.cond_transform(raw_img)  # Corrupted/Low-Res conditioning input
+        
+        return x_clean, x_cond
+
+
+# ==========================================
+# 7. Training Pipeline
+# ==========================================
+if __name__ == "__main__":
+    try:
+        dataset = Img2ImgDataset(DATASET_PATH, IMAGE_SIZE)
+        dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+        print(f"Loaded {len(dataset)} images for Img2Img Diffusion.")
+
+        model = ConditionalUNet().to(DEVICE)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        criterion = nn.MSELoss()
+
+        print(f"\n--- Training Conditional Diffusion Model ({EPOCHS} Epochs) ---")
+        for epoch in range(1, EPOCHS + 1):
+            model.train()
+            running_loss = 0.0
+
+            for x_clean, x_cond in dataloader:
+                x_clean, x_cond = x_clean.to(DEVICE), x_cond.to(DEVICE)
+                
+                # Sample random time steps t
+                t = torch.randint(0, TIMESTEPS, (x_clean.shape[0],), device=DEVICE).long()
+                
+                # Forward Process: Add noise to clean image x_clean
+                x_noisy, true_noise = q_sample(x_clean, t)
+                
+                # Model predicts noise given (x_noisy, x_cond, t)
+                predicted_noise = model(x_noisy, x_cond, t)
+                
+                loss = criterion(predicted_noise, true_noise)
+                
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item()
+
+            avg_loss = running_loss / len(dataloader)
+            print(f"Epoch [{epoch:02d}/{EPOCHS}] | MSE Loss: {avg_loss:.6f}")
+
+        # --- Display Results ---
+        print("\n--- Running Img2Img Inference ---")
+        model.eval()
+        x_clean_sample, x_cond_sample = next(iter(dataloader))
+        x_cond_sample = x_cond_sample[:4].to(DEVICE)
+        
+        generated_clean = sample_img2img(model, x_cond_sample)
+
+        # Plot Ground Truth, Condition, and Diffusion Result
+        fig, axes = plt.subplots(3, 4, figsize=(12, 9))
+        for i in range(4):
+            # Denormalize from [-1, 1] to [0, 1]
+            cond_img = (x_cond_sample[i].cpu().permute(1, 2, 0).numpy() + 1) / 2.0
+            gen_img = (generated_clean[i].cpu().permute(1, 2, 0).numpy() + 1) / 2.0
+            gt_img = (x_clean_sample[i].permute(1, 2, 0).numpy() + 1) / 2.0
+
+            axes[0, i].imshow(cond_img)
+            axes[0, i].axis("off")
+            if i == 0: axes[0, i].set_title("Input Condition (x_cond)", fontweight='bold')
+
+            axes[1, i].imshow(gen_img)
+            axes[1, i].axis("off")
+            if i == 0: axes[1, i].set_title("Diffusion Output (Restored)", fontweight='bold')
+
+            axes[2, i].imshow(gt_img)
+            axes[2, i].axis("off")
+            if i == 0: axes[2, i].set_title("Ground Truth (Target)", fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()
+
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
